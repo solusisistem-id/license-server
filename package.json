@@ -1,0 +1,20 @@
+{
+  "name": "bill-management-multi-app-license-server",
+  "version": "2.0.0",
+  "description": "Multi-App Lifetime License Server for Bill Management and other applications",
+  "main": "api/index.js",
+  "scripts": {
+    "start": "node api/index.js",
+    "dev": "vercel dev"
+  },
+  "engines": {
+    "node": ">=18.x"
+  },
+  "keywords": [
+    "license",
+    "license-server",
+    "multi-app",
+    "lifetime-license"
+  ],
+  "license": "MIT"
+}
