@@ -1,11 +1,14 @@
 {
   "name": "bill-management-multi-app-license-server",
-  "version": "2.0.0",
-  "description": "Multi-App Lifetime License Server for Bill Management and other applications",
+  "version": "3.0.0",
+  "description": "Multi-App Lifetime License Server for Bill Management and other applications with Vercel KV persistent storage",
   "main": "api/index.js",
   "scripts": {
     "start": "node api/index.js",
     "dev": "vercel dev"
+  },
+  "dependencies": {
+    "@vercel/kv": "^3.0.0"
   },
   "engines": {
     "node": ">=18.x"
@@ -14,7 +17,9 @@
     "license",
     "license-server",
     "multi-app",
-    "lifetime-license"
+    "lifetime-license",
+    "vercel-kv",
+    "persistent-storage"
   ],
   "license": "MIT"
 }
