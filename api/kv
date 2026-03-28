@@ -1,0 +1,340 @@
+/**
+ * =====================================================
+ * VERCEL KV HELPER FUNCTIONS
+ * Abstraction layer untuk semua operasi database
+ * =====================================================
+ * 
+ * File ini berisi semua fungsi untuk berinteraksi dengan
+ * Vercel KV (Redis) storage. Menggunakan pattern ini
+ * memudahkan jika suatu saat ingin ganti database.
+ */
+
+import { kv } from '@vercel/kv';
+
+// =====================================================
+// INITIALIZATION
+// =====================================================
+
+/**
+ * Inisialisasi data awal jika belum ada
+ * Dipanggil saat server pertama kali start atau cold start
+ * 
+ * @returns {Promise<void>}
+ */
+export async function initializeData() {
+  try {
+    // Cek apakah sudah ada data apps
+    const appsExists = await kv.exists('apps');
+    if (!appsExists) {
+      await kv.set('apps', {});
+      console.log('[KV] Initialized apps storage');
+    }
+
+    // Cek apakah sudah ada data licenses
+    const licensesExists = await kv.exists('licenses');
+    if (!licensesExists) {
+      await kv.set('licenses', {});
+      console.log('[KV] Initialized licenses storage');
+    }
+  } catch (error) {
+    console.error('[KV] Initialization error:', error.message);
+  }
+}
+
+// =====================================================
+// APP OPERATIONS
+// =====================================================
+
+/**
+ * Simpan app baru atau update app yang sudah ada
+ * 
+ * @param {string} appId - ID aplikasi (contoh: APP-ABC123)
+ * @param {Object} appData - Data aplikasi
+ * @returns {Promise<Object>} Data aplikasi yang disimpan
+ */
+export async function saveApp(appId, appData) {
+  const apps = await kv.get('apps') || {};
+  apps[appId] = appData;
+  await kv.set('apps', apps);
+  return appData;
+}
+
+/**
+ * Ambil data app berdasarkan ID
+ * 
+ * @param {string} appId - ID aplikasi
+ * @returns {Promise<Object|null>} Data aplikasi atau null jika tidak ada
+ */
+export async function getApp(appId) {
+  const apps = await kv.get('apps') || {};
+  return apps[appId] || null;
+}
+
+/**
+ * Ambil semua apps
+ * 
+ * @returns {Promise<Object>} Object dengan key=appId, value=appData
+ */
+export async function getAllApps() {
+  return await kv.get('apps') || {};
+}
+
+/**
+ * Hapus app berdasarkan ID
+ * 
+ * @param {string} appId - ID aplikasi yang akan dihapus
+ * @returns {Promise<void>}
+ */
+export async function deleteApp(appId) {
+  const apps = await kv.get('apps') || {};
+  delete apps[appId];
+  await kv.set('apps', apps);
+}
+
+/**
+ * Cek apakah app ID sudah ada
+ * 
+ * @param {string} appId - ID aplikasi
+ * @returns {Promise<boolean>} true jika ada, false jika tidak
+ */
+export async function appExists(appId) {
+  const apps = await kv.get('apps') || {};
+  return appId in apps;
+}
+
+// =====================================================
+// LICENSE OPERATIONS
+// =====================================================
+
+/**
+ * Simpan license baru atau update yang sudah ada
+ * 
+ * @param {string} key - License key (contoh: BM-BILL-A1B2-C3D4-E5F6)
+ * @param {Object} licenseData - Data license
+ * @returns {Promise<Object>} Data license yang disimpan
+ */
+export async function saveLicense(key, licenseData) {
+  const licenses = await kv.get('licenses') || {};
+  const normalizedKey = key.toUpperCase();
+  licenses[normalizedKey] = licenseData;
+  await kv.set('licenses', licenses);
+  return licenseData;
+}
+
+/**
+ * Ambil license berdasarkan key
+ * 
+ * @param {string} key - License key
+ * @returns {Promise<Object|null>} Data license atau null jika tidak ada
+ */
+export async function getLicense(key) {
+  const licenses = await kv.get('licenses') || {};
+  return licenses[key.toUpperCase()] || null;
+}
+
+/**
+ * Ambil semua licenses
+ * 
+ * @returns {Promise<Object>} Object dengan key=licenseKey, value=licenseData
+ */
+export async function getAllLicenses() {
+  return await kv.get('licenses') || {};
+}
+
+/**
+ * Hapus license berdasarkan key
+ * 
+ * @param {string} key - License key yang akan dihapus
+ * @returns {Promise<void>}
+ */
+export async function deleteLicense(key) {
+  const licenses = await kv.get('licenses') || {};
+  delete licenses[key.toUpperCase()];
+  await kv.set('licenses', licenses);
+}
+
+/**
+ * Cek apakah license key sudah ada
+ * 
+ * @param {string} key - License key
+ * @returns {Promise<boolean>} true jika ada, false jika tidak
+ */
+export async function licenseExists(key) {
+  const licenses = await kv.get('licenses') || {};
+  return key.toUpperCase() in licenses;
+}
+
+/**
+ * Update sebagian data license (partial update)
+ * 
+ * @param {string} key - License key
+ * @param {Object} updates - Field yang akan diupdate
+ * @returns {Promise<Object|null>} Data license yang diupdate atau null
+ */
+export async function updateLicense(key, updates) {
+  const licenses = await kv.get('licenses') || {};
+  const normalizedKey = key.toUpperCase();
+  const license = licenses[normalizedKey];
+  
+  if (license) {
+    licenses[normalizedKey] = { ...license, ...updates };
+    await kv.set('licenses', licenses);
+    return licenses[normalizedKey];
+  }
+  return null;
+}
+
+/**
+ * Hitung total license untuk app tertentu
+ * 
+ * @param {string} appId - ID aplikasi
+ * @returns {Promise<number>} Jumlah license
+ */
+export async function countLicensesByApp(appId) {
+  const licenses = await kv.get('licenses') || {};
+  let count = 0;
+  
+  for (const key in licenses) {
+    if (licenses[key].appId === appId) {
+      count++;
+    }
+  }
+  
+  return count;
+}
+
+// =====================================================
+// STATS OPERATIONS
+// =====================================================
+
+/**
+ * Hitung statistik license
+ * 
+ * @param {string|null} appId - Filter by app ID (null = semua app)
+ * @returns {Promise<Object>} Statistik license
+ */
+export async function getLicenseStats(appId = null) {
+  const licenses = await kv.get('licenses') || {};
+  
+  const stats = {
+    total: 0,
+    available: 0,
+    active: 0,
+    revoked: 0
+  };
+
+  for (const key in licenses) {
+    const license = licenses[key];
+    
+    // Filter by appId jika diberikan
+    if (appId && license.appId !== appId) continue;
+    
+    stats.total++;
+    if (license.status === 'available') stats.available++;
+    else if (license.status === 'active') stats.active++;
+    else if (license.status === 'revoked') stats.revoked++;
+  }
+
+  return stats;
+}
+
+/**
+ * Filter licenses dengan kriteria tertentu
+ * 
+ * @param {Object} filters - Kriteria filter
+ * @param {string} [filters.appId] - Filter by app ID
+ * @param {string} [filters.status] - Filter by status
+ * @param {string} [filters.email] - Filter by email
+ * @param {number} [filters.offset=0] - Offset untuk pagination
+ * @param {number} [filters.limit=100] - Limit untuk pagination
+ * @returns {Promise<Object>} Hasil filter dengan total dan array licenses
+ */
+export async function filterLicenses(filters = {}) {
+  const licenses = await kv.get('licenses') || {};
+  const result = [];
+
+  for (const key in licenses) {
+    const license = licenses[key];
+    let match = true;
+
+    // Filter by appId
+    if (filters.appId && license.appId !== filters.appId) {
+      match = false;
+    }
+
+    // Filter by status
+    if (filters.status && license.status !== filters.status) {
+      match = false;
+    }
+
+    // Filter by email
+    if (filters.email && license.activatedEmail !== filters.email) {
+      match = false;
+    }
+
+    if (match) {
+      result.push({ key, ...license });
+    }
+  }
+
+  // Sort by createdAt desc (terbaru dulu)
+  result.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+
+  // Pagination
+  const offset = filters.offset || 0;
+  const limit = filters.limit || 100;
+  
+  return {
+    total: result.length,
+    licenses: result.slice(offset, offset + limit)
+  };
+}
+
+// =====================================================
+// BACKUP & RESTORE
+// =====================================================
+
+/**
+ * Export semua data untuk backup
+ * Berguna untuk migrasi atau backup berkala
+ * 
+ * @returns {Promise<Object>} Semua data apps dan licenses
+ */
+export async function exportAllData() {
+  return {
+    apps: await kv.get('apps') || {},
+    licenses: await kv.get('licenses') || {},
+    exportedAt: new Date().toISOString(),
+    version: '2.0'
+  };
+}
+
+/**
+ * Import data dari backup
+ * Berguna untuk restore atau migrasi
+ * 
+ * @param {Object} data - Data hasil export
+ * @returns {Promise<boolean>} true jika berhasil
+ */
+export async function importAllData(data) {
+  if (data.apps) {
+    await kv.set('apps', data.apps);
+  }
+  if (data.licenses) {
+    await kv.set('licenses', data.licenses);
+  }
+  console.log('[KV] Data imported successfully');
+  return true;
+}
+
+/**
+ * Clear semua data (DANGER!)
+ * Hanya untuk development/testing
+ * 
+ * @returns {Promise<void>}
+ */
+export async function clearAllData() {
+  await kv.set('apps', {});
+  await kv.set('licenses', {});
+  console.log('[KV] All data cleared');
+}
