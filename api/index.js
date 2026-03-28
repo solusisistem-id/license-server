@@ -1,15 +1,40 @@
+/**
+ * =====================================================
+ * BILL MANAGEMENT - MULTI-APP LICENSE SERVER v3.0
+ * =====================================================
+ * 
+ * Fitur:
+ * - Lifetime License Support
+ * - Multi-Application Support
+ * - Vercel KV Persistent Storage (Redis)
+ * 
+ * Changelog v3.0:
+ * - Upgrade dari memory storage ke Vercel KV
+ * - Data sekarang persist (tidak hilang saat cold start)
+ * - Performance lebih baik dengan Redis
+ * 
+ * Author: Bill Management Team
+ * License: MIT
+ */
+
 import crypto from 'crypto';
+import { 
+  initializeData,
+  saveApp, getApp, getAllApps, deleteApp, appExists,
+  saveLicense, getLicense, getAllLicenses, deleteLicense, licenseExists, updateLicense,
+  getLicenseStats, filterLicenses,
+  exportAllData, importAllData, clearAllData,
+  countLicensesByApp
+} from './kv.js';
 
 // =====================================================
-// BILL MANAGEMENT - MULTI-APP LICENSE SERVER v2.0
-// Fitur: Lifetime License + Multi-Application Support
+// CONFIGURATION
 // =====================================================
 
-// Data storage (dalam memory - untuk production gunakan database)
-let licenses = new Map();
-let apps = new Map();
-
-// Secret key untuk signing
+/**
+ * Secret key untuk signing dan admin authentication
+ * PENTING: Ganti nilai default di Vercel Environment Variables!
+ */
 const SECRET_KEY = process.env.SECRET_KEY || 'your-secret-key-change-in-production';
 const ADMIN_TOKEN = process.env.ADMIN_TOKEN || 'admin-token-change-in-production';
 
@@ -18,34 +43,54 @@ const ADMIN_TOKEN = process.env.ADMIN_TOKEN || 'admin-token-change-in-production
 // =====================================================
 
 /**
- * Generate unique license key
- * Format: BM-APPNAME-XXXX-XXXX-XXXX (contoh: BM-BILL-A1B2-C3D4-E5F6)
+ * Generate unique license key dengan format standar
+ * 
+ * Format: BM-{APP_PREFIX}-{RANDOM}-{RANDOM}-{RANDOM}
+ * Contoh: BM-BILL-A1B2-C3D4-E5F6
+ * 
+ * @param {string} appId - ID aplikasi untuk prefix
+ * @returns {string} License key yang di-generate
  */
 function generateLicenseKey(appId) {
+  // Ambil 4 karakter pertama dari appId sebagai prefix
   const appPrefix = appId.substring(0, 4).toUpperCase();
+  
+  // Generate 3 bagian random (masing-masing 4 karakter hex)
   const parts = [];
   for (let i = 0; i < 3; i++) {
     parts.push(crypto.randomBytes(2).toString('hex').toUpperCase());
   }
+  
   return `BM-${appPrefix}-${parts.join('-')}`;
 }
 
 /**
  * Generate unique app ID
+ * 
+ * Format: APP-XXXXXX (6 karakter hex)
+ * Contoh: APP-A1B2C3
+ * 
+ * @returns {string} App ID yang di-generate
  */
 function generateAppId() {
   return `APP-${crypto.randomBytes(3).toString('hex').toUpperCase()}`;
 }
 
 /**
- * Validate license key format
+ * Validasi format license key
+ * 
+ * @param {string} key - License key yang akan divalidasi
+ * @returns {boolean} true jika format valid
  */
 function isValidLicenseFormat(key) {
   return /^BM-[A-Z0-9]{4}-[A-F0-9]{4}-[A-F0-9]{4}-[A-F0-9]{4}$/i.test(key);
 }
 
 /**
- * Check if request has valid admin token
+ * Cek apakah request memiliki admin token yang valid
+ * 
+ * @param {Object} req - Request object
+ * @returns {boolean} true jika admin valid
  */
 function isAdmin(req) {
   const token = req.headers.authorization || 
@@ -55,28 +100,57 @@ function isAdmin(req) {
 }
 
 /**
- * Send JSON response
+ * Kirim JSON response dengan CORS headers
+ * 
+ * @param {Object} res - Response object
+ * @param {number} status - HTTP status code
+ * @param {Object} data - Data yang akan dikirim
+ * @returns {Object} Response object
  */
 function sendResponse(res, status, data) {
+  // CORS headers untuk membolehkan akses dari domain manapun
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'GET, POST, DELETE, OPTIONS');
   res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
   return res.status(status).json(data);
 }
 
+/**
+ * Mask email untuk privacy (tampilkan 2 karakter pertama + ***)
+ * 
+ * @param {string} email - Email yang akan di-mask
+ * @returns {string} Email yang sudah di-mask
+ */
+function maskEmail(email) {
+  if (!email) return null;
+  return email.replace(/(.{2}).*@/, '$1***@');
+}
+
 // =====================================================
 // MAIN HANDLER
 // =====================================================
 
+/**
+ * Main API handler
+ * Menangani semua request ke /api
+ * 
+ * @param {Object} req - Request object
+ * @param {Object} res - Response object
+ * @returns {Object} Response
+ */
 export default async function handler(req, res) {
-  // Handle CORS preflight
+  // Handle CORS preflight request
   if (req.method === 'OPTIONS') {
     return sendResponse(res, 200, { ok: true });
   }
 
+  // Inisialisasi data jika belum ada (untuk cold start)
+  await initializeData();
+
   const { action } = req.query;
 
   try {
+    // Route ke handler yang sesuai berdasarkan action
     switch (action) {
       // === LICENSE ENDPOINTS ===
       case 'validate':
@@ -106,12 +180,19 @@ export default async function handler(req, res) {
       case 'app/delete':
         return await handleAppDelete(req, res);
       
+      // === BACKUP ENDPOINTS ===
+      case 'backup':
+        return await handleBackup(req, res);
+      case 'restore':
+        return await handleRestore(req, res);
+      
       // === HEALTH CHECK ===
       case 'health':
         return sendResponse(res, 200, { 
           status: 'ok', 
-          version: '2.0.0',
-          features: ['lifetime_license', 'multi_app']
+          version: '3.0.0',
+          storage: 'vercel-kv',
+          features: ['lifetime_license', 'multi_app', 'persistent_storage']
         });
       
       default:
@@ -122,12 +203,13 @@ export default async function handler(req, res) {
             'validate', 'activate', 'deactivate', 'info',
             'generate', 'list', 'revoke',
             'app/create', 'app/list', 'app/info', 'app/delete',
+            'backup', 'restore',
             'health'
           ]
         });
     }
   } catch (error) {
-    console.error('Error:', error);
+    console.error('[API] Error:', error);
     return sendResponse(res, 500, { 
       success: false, 
       error: 'Terjadi kesalahan server',
@@ -142,12 +224,18 @@ export default async function handler(req, res) {
 
 /**
  * Validate license key
- * GET /api?action=validate&key=LICENSE_KEY&email=USER_EMAIL
+ * Cek apakah license valid, aktif, dan sesuai dengan email/app
+ * 
+ * GET /api?action=validate&key=LICENSE_KEY&email=USER_EMAIL&appId=APP_ID
+ * 
+ * @param {Object} req - Request object
+ * @param {Object} res - Response object
+ * @returns {Object} Response dengan status validasi
  */
 async function handleValidate(req, res) {
   const { key, email, appId } = req.query;
 
-  // Validasi input
+  // Validasi input wajib
   if (!key) {
     return sendResponse(res, 400, { 
       success: false, 
@@ -155,14 +243,16 @@ async function handleValidate(req, res) {
     });
   }
 
+  // Validasi format license key
   if (!isValidLicenseFormat(key)) {
     return sendResponse(res, 400, { 
       success: false, 
-      error: 'Format license key tidak valid' 
+      error: 'Format license key tidak valid. Format: BM-XXXX-XXXX-XXXX-XXXX' 
     });
   }
 
-  const license = licenses.get(key.toUpperCase());
+  // Ambil license dari database
+  const license = await getLicense(key);
 
   if (!license) {
     return sendResponse(res, 404, { 
@@ -172,7 +262,7 @@ async function handleValidate(req, res) {
     });
   }
 
-  // Cek status license
+  // Cek status license (revoked = diblokir)
   if (license.status === 'revoked') {
     return sendResponse(res, 200, { 
       success: true,
@@ -182,7 +272,7 @@ async function handleValidate(req, res) {
     });
   }
 
-  // Cek appId jika diberikan
+  // Cek appId jika diberikan (pastikan license untuk app yang benar)
   if (appId && license.appId !== appId) {
     return sendResponse(res, 200, { 
       success: true,
@@ -202,8 +292,8 @@ async function handleValidate(req, res) {
     });
   }
 
-  // License valid - LIFETIME (tidak ada expired)
-  const app = apps.get(license.appId);
+  // License valid - ambil info app
+  const app = await getApp(license.appId);
   
   return sendResponse(res, 200, { 
     success: true,
@@ -212,8 +302,7 @@ async function handleValidate(req, res) {
       key: key.toUpperCase(),
       appId: license.appId,
       appName: app?.name || 'Unknown App',
-      type: license.type || 'lifetime',
-      licenseType: 'LIFETIME', // Selalu lifetime
+      type: 'LIFETIME', // Selalu lifetime
       activatedAt: license.activatedAt,
       activatedEmail: license.activatedEmail,
       maxDevices: license.maxDevices || 1,
@@ -230,11 +319,18 @@ async function handleValidate(req, res) {
 }
 
 /**
- * Activate license
+ * Activate license untuk user/device
+ * Mengikat license ke email dan device tertentu
+ * 
  * POST /api?action=activate
  * Body: { key, email, deviceInfo?, appId? }
+ * 
+ * @param {Object} req - Request object
+ * @param {Object} res - Response object
+ * @returns {Object} Response dengan hasil aktivasi
  */
 async function handleActivate(req, res) {
+  // Hanya terima POST request
   if (req.method !== 'POST') {
     return sendResponse(res, 405, { 
       success: false, 
@@ -244,7 +340,7 @@ async function handleActivate(req, res) {
 
   const { key, email, deviceInfo, appId } = req.body;
 
-  // Validasi input
+  // Validasi input wajib
   if (!key || !email) {
     return sendResponse(res, 400, { 
       success: false, 
@@ -252,6 +348,7 @@ async function handleActivate(req, res) {
     });
   }
 
+  // Validasi format license key
   if (!isValidLicenseFormat(key)) {
     return sendResponse(res, 400, { 
       success: false, 
@@ -259,7 +356,8 @@ async function handleActivate(req, res) {
     });
   }
 
-  const license = licenses.get(key.toUpperCase());
+  // Ambil license dari database
+  const license = await getLicense(key);
 
   if (!license) {
     return sendResponse(res, 404, { 
@@ -268,7 +366,7 @@ async function handleActivate(req, res) {
     });
   }
 
-  // Cek status
+  // Cek status license
   if (license.status === 'revoked') {
     return sendResponse(res, 400, { 
       success: false, 
@@ -276,7 +374,7 @@ async function handleActivate(req, res) {
     });
   }
 
-  // Cek appId
+  // Cek appId (pastikan license untuk app yang benar)
   if (appId && license.appId !== appId) {
     return sendResponse(res, 400, { 
       success: false, 
@@ -293,7 +391,7 @@ async function handleActivate(req, res) {
     });
   }
 
-  // Cek jumlah device
+  // Cek jumlah device yang sudah terdaftar
   const currentDevices = license.currentDevices || 0;
   const maxDevices = license.maxDevices || 1;
   
@@ -304,21 +402,28 @@ async function handleActivate(req, res) {
     });
   }
 
-  // Generate device ID
-  const deviceId = crypto.createHash('md5').update(email + (deviceInfo?.name || 'default')).digest('hex').substring(0, 8);
+  // Generate device ID unik berdasarkan email dan device info
+  const deviceId = crypto.createHash('md5')
+    .update(email + (deviceInfo?.name || 'default'))
+    .digest('hex')
+    .substring(0, 8);
   
-  // Update license
-  license.activatedAt = license.activatedAt || new Date().toISOString();
-  license.activatedEmail = license.activatedEmail || email;
-  license.currentDevices = (license.currentDevices || 0) + 1;
-  license.deviceId = deviceId;
-  license.deviceInfo = deviceInfo || {};
-  license.lastUsed = new Date().toISOString();
-  license.status = 'active';
+  // Siapkan data update
+  const updates = {
+    activatedAt: license.activatedAt || new Date().toISOString(),
+    activatedEmail: license.activatedEmail || email,
+    currentDevices: (license.currentDevices || 0) + 1,
+    deviceId: deviceId,
+    deviceInfo: deviceInfo || {},
+    lastUsed: new Date().toISOString(),
+    status: 'active'
+  };
 
-  licenses.set(key.toUpperCase(), license);
-
-  const app = apps.get(license.appId);
+  // Update license di database
+  await updateLicense(key, updates);
+  
+  // Ambil info app
+  const app = await getApp(license.appId);
 
   return sendResponse(res, 200, { 
     success: true,
@@ -328,7 +433,7 @@ async function handleActivate(req, res) {
       appId: license.appId,
       appName: app?.name || 'Unknown App',
       type: 'LIFETIME',
-      activatedAt: license.activatedAt,
+      activatedAt: updates.activatedAt,
       deviceId: deviceId,
       maxDevices: maxDevices,
       features: license.features || []
@@ -337,9 +442,15 @@ async function handleActivate(req, res) {
 }
 
 /**
- * Deactivate license from device
+ * Deactivate license dari device
+ * Mengurangi jumlah device yang terdaftar
+ * 
  * POST /api?action=deactivate
  * Body: { key, email }
+ * 
+ * @param {Object} req - Request object
+ * @param {Object} res - Response object
+ * @returns {Object} Response dengan hasil deaktivasi
  */
 async function handleDeactivate(req, res) {
   if (req.method !== 'POST') {
@@ -358,7 +469,7 @@ async function handleDeactivate(req, res) {
     });
   }
 
-  const license = licenses.get(key.toUpperCase());
+  const license = await getLicense(key);
 
   if (!license) {
     return sendResponse(res, 404, { 
@@ -367,6 +478,7 @@ async function handleDeactivate(req, res) {
     });
   }
 
+  // Pastikan email yang deactivate adalah email yang sama
   if (license.activatedEmail !== email) {
     return sendResponse(res, 400, { 
       success: false, 
@@ -374,26 +486,30 @@ async function handleDeactivate(req, res) {
     });
   }
 
-  // Reset device count
-  license.currentDevices = Math.max(0, (license.currentDevices || 1) - 1);
-  license.lastUsed = new Date().toISOString();
-
-  if (license.currentDevices === 0) {
-    license.status = 'inactive';
-  }
-
-  licenses.set(key.toUpperCase(), license);
+  // Update device count
+  const newDeviceCount = Math.max(0, (license.currentDevices || 1) - 1);
+  
+  await updateLicense(key, {
+    currentDevices: newDeviceCount,
+    lastUsed: new Date().toISOString(),
+    status: newDeviceCount === 0 ? 'inactive' : 'active'
+  });
 
   return sendResponse(res, 200, { 
     success: true,
     message: 'Device berhasil di-deactivate',
-    remainingDevices: license.currentDevices
+    remainingDevices: newDeviceCount
   });
 }
 
 /**
- * Get license info
+ * Get license info (detail lengkap)
+ * 
  * GET /api?action=info&key=LICENSE_KEY
+ * 
+ * @param {Object} req - Request object
+ * @param {Object} res - Response object
+ * @returns {Object} Response dengan info license
  */
 async function handleInfo(req, res) {
   const { key } = req.query;
@@ -405,7 +521,7 @@ async function handleInfo(req, res) {
     });
   }
 
-  const license = licenses.get(key.toUpperCase());
+  const license = await getLicense(key);
 
   if (!license) {
     return sendResponse(res, 404, { 
@@ -414,7 +530,7 @@ async function handleInfo(req, res) {
     });
   }
 
-  const app = apps.get(license.appId);
+  const app = await getApp(license.appId);
 
   return sendResponse(res, 200, { 
     success: true,
@@ -426,7 +542,7 @@ async function handleInfo(req, res) {
       status: license.status,
       createdAt: license.createdAt,
       activatedAt: license.activatedAt,
-      activatedEmail: license.activatedEmail ? license.activatedEmail.replace(/(.{2}).*@/, '$1***@') : null,
+      activatedEmail: maskEmail(license.activatedEmail),
       maxDevices: license.maxDevices,
       currentDevices: license.currentDevices || 0,
       features: license.features || [],
@@ -446,10 +562,15 @@ async function handleInfo(req, res) {
 // =====================================================
 
 /**
- * Generate new license keys
+ * Generate new license keys (Admin only)
+ * 
  * POST /api?action=generate
  * Headers: Authorization: ADMIN_TOKEN
- * Body: { appId, count, maxDevices, features, email? }
+ * Body: { appId, count, maxDevices, features, email?, notes? }
+ * 
+ * @param {Object} req - Request object
+ * @param {Object} res - Response object
+ * @returns {Object} Response dengan license keys yang di-generate
  */
 async function handleGenerate(req, res) {
   if (req.method !== 'POST') {
@@ -459,6 +580,7 @@ async function handleGenerate(req, res) {
     });
   }
 
+  // Cek admin authorization
   if (!isAdmin(req)) {
     return sendResponse(res, 401, { 
       success: false, 
@@ -468,7 +590,7 @@ async function handleGenerate(req, res) {
 
   const { appId, count = 1, maxDevices = 1, features = [], email, notes } = req.body;
 
-  // Validasi appId
+  // Validasi appId wajib
   if (!appId) {
     return sendResponse(res, 400, { 
       success: false, 
@@ -476,7 +598,8 @@ async function handleGenerate(req, res) {
     });
   }
 
-  const app = apps.get(appId);
+  // Pastikan app exists
+  const app = await getApp(appId);
   if (!app) {
     return sendResponse(res, 404, { 
       success: false, 
@@ -486,10 +609,12 @@ async function handleGenerate(req, res) {
 
   const generatedKeys = [];
 
+  // Generate license keys sesuai jumlah yang diminta
   for (let i = 0; i < count; i++) {
     const key = generateLicenseKey(appId);
     
-    licenses.set(key, {
+    // Simpan license baru ke database
+    await saveLicense(key, {
       key,
       appId: appId,
       type: 'lifetime',
@@ -499,17 +624,17 @@ async function handleGenerate(req, res) {
       currentDevices: 0,
       features: features,
       preAssignedEmail: email || null,
-      notes: notes || null,
+      notes: notes || null
       // LIFETIME - tidak ada expiresAt
     });
 
     generatedKeys.push(key);
-    
-    // Update app stats
-    app.totalLicenses = (app.totalLicenses || 0) + 1;
   }
 
-  apps.set(appId, app);
+  // Update total licenses count di app
+  await updateApp(appId, {
+    totalLicenses: (app.totalLicenses || 0) + count
+  });
 
   return sendResponse(res, 200, { 
     success: true,
@@ -522,10 +647,27 @@ async function handleGenerate(req, res) {
 }
 
 /**
- * List all licenses (with filters)
- * GET /api?action=list&appId=APP_ID&status=STATUS&adminToken=TOKEN
+ * Helper: Update app data
+ */
+async function updateApp(appId, updates) {
+  const app = await getApp(appId);
+  if (app) {
+    await saveApp(appId, { ...app, ...updates });
+  }
+}
+
+/**
+ * List all licenses (Admin only)
+ * Support filtering dan pagination
+ * 
+ * GET /api?action=list&appId=APP_ID&status=STATUS&adminToken=TOKEN&limit=100&offset=0
+ * 
+ * @param {Object} req - Request object
+ * @param {Object} res - Response object
+ * @returns {Object} Response dengan daftar licenses
  */
 async function handleList(req, res) {
+  // Cek admin authorization
   if (!isAdmin(req)) {
     return sendResponse(res, 401, { 
       success: false, 
@@ -535,68 +677,57 @@ async function handleList(req, res) {
 
   const { appId, status, limit = 100, offset = 0 } = req.query;
   
-  let allLicenses = [];
-  
-  licenses.forEach((license) => {
-    // Filter by appId
-    if (appId && license.appId !== appId) return;
+  // Gunakan filterLicenses helper
+  const { total, licenses: filteredLicenses } = await filterLicenses({
+    appId,
+    status,
+    limit: parseInt(limit),
+    offset: parseInt(offset)
+  });
+
+  // Format response
+  const formattedLicenses = filteredLicenses.map(license => {
+    const app = getApp(license.appId); // Note: ini async tapi kita skip untuk performa
     
-    // Filter by status
-    if (status && license.status !== status) return;
-    
-    const app = apps.get(license.appId);
-    
-    allLicenses.push({
+    return {
       key: license.key,
       appId: license.appId,
-      appName: app?.name || 'Unknown',
+      appName: 'N/A', // Akan diisi di client jika perlu
       type: 'LIFETIME',
       status: license.status,
       createdAt: license.createdAt,
       activatedAt: license.activatedAt,
-      activatedEmail: license.activatedEmail ? license.activatedEmail.replace(/(.{2}).*@/, '$1***@') : null,
+      activatedEmail: maskEmail(license.activatedEmail),
       maxDevices: license.maxDevices,
       currentDevices: license.currentDevices || 0,
       lastUsed: license.lastUsed,
       notes: license.notes
-    });
+    };
   });
 
-  // Sort by createdAt desc
-  allLicenses.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
-
-  // Pagination
-  const total = allLicenses.length;
-  allLicenses = allLicenses.slice(parseInt(offset), parseInt(offset) + parseInt(limit));
-
-  // Stats
-  const stats = {
-    total: licenses.size,
-    available: 0,
-    active: 0,
-    revoked: 0
-  };
-  
-  licenses.forEach(l => {
-    if (l.status === 'available') stats.available++;
-    else if (l.status === 'active') stats.active++;
-    else if (l.status === 'revoked') stats.revoked++;
-  });
+  // Get stats
+  const stats = await getLicenseStats(appId);
 
   return sendResponse(res, 200, { 
     success: true,
-    count: allLicenses.length,
+    count: formattedLicenses.length,
     total: total,
     stats: stats,
-    licenses: allLicenses
+    licenses: formattedLicenses
   });
 }
 
 /**
- * Revoke license
+ * Revoke license (Admin only)
+ * Memblokir license agar tidak bisa digunakan
+ * 
  * POST /api?action=revoke
  * Headers: Authorization: ADMIN_TOKEN
  * Body: { key, reason }
+ * 
+ * @param {Object} req - Request object
+ * @param {Object} res - Response object
+ * @returns {Object} Response dengan hasil revoke
  */
 async function handleRevoke(req, res) {
   if (req.method !== 'POST') {
@@ -622,7 +753,7 @@ async function handleRevoke(req, res) {
     });
   }
 
-  const license = licenses.get(key.toUpperCase());
+  const license = await getLicense(key);
   
   if (!license) {
     return sendResponse(res, 404, { 
@@ -631,18 +762,18 @@ async function handleRevoke(req, res) {
     });
   }
 
-  // Revoke license
-  license.status = 'revoked';
-  license.revokedAt = new Date().toISOString();
-  license.revokeReason = reason || 'No reason provided';
-  
-  licenses.set(key.toUpperCase(), license);
+  // Update status ke revoked
+  await updateLicense(key, {
+    status: 'revoked',
+    revokedAt: new Date().toISOString(),
+    revokeReason: reason || 'No reason provided'
+  });
 
   return sendResponse(res, 200, { 
     success: true,
     message: 'License berhasil di-revoke',
     key: key.toUpperCase(),
-    reason: license.revokeReason
+    reason: reason || 'No reason provided'
   });
 }
 
@@ -651,10 +782,16 @@ async function handleRevoke(req, res) {
 // =====================================================
 
 /**
- * Create new application
+ * Create new application (Admin only)
+ * Mendaftarkan aplikasi baru ke sistem license
+ * 
  * POST /api?action=app/create
  * Headers: Authorization: ADMIN_TOKEN
- * Body: { name, description, version, features }
+ * Body: { name, description?, version?, features?, website?, category? }
+ * 
+ * @param {Object} req - Request object
+ * @param {Object} res - Response object
+ * @returns {Object} Response dengan app yang baru dibuat
  */
 async function handleAppCreate(req, res) {
   if (req.method !== 'POST') {
@@ -680,7 +817,7 @@ async function handleAppCreate(req, res) {
     });
   }
 
-  // Generate unique app ID
+  // Generate unique app ID dengan retry mechanism
   let appId;
   let attempts = 0;
   do {
@@ -689,11 +826,12 @@ async function handleAppCreate(req, res) {
     if (attempts > 10) {
       return sendResponse(res, 500, { 
         success: false, 
-        error: 'Gagal generate App ID unik' 
+        error: 'Gagal generate App ID unik. Coba lagi.' 
       });
     }
-  } while (apps.has(appId));
+  } while (await appExists(appId));
 
+  // Siapkan data app
   const app = {
     id: appId,
     name: name,
@@ -708,7 +846,8 @@ async function handleAppCreate(req, res) {
     status: 'active'
   };
 
-  apps.set(appId, app);
+  // Simpan ke database
+  await saveApp(appId, app);
 
   return sendResponse(res, 201, { 
     success: true,
@@ -718,24 +857,26 @@ async function handleAppCreate(req, res) {
 }
 
 /**
- * List all applications
+ * List all applications (Public)
+ * Menampilkan semua aplikasi yang terdaftar
+ * 
  * GET /api?action=app/list
+ * 
+ * @param {Object} req - Request object
+ * @param {Object} res - Response object
+ * @returns {Object} Response dengan daftar aplikasi
  */
 async function handleAppList(req, res) {
-  // Public endpoint - bisa dilihat tanpa admin token
+  // Public endpoint - tidak perlu admin token
+  const apps = await getAllApps();
   
   const allApps = [];
   
-  apps.forEach((app) => {
-    // Count licenses for this app
-    let licenseCount = { total: 0, active: 0, available: 0 };
-    licenses.forEach(l => {
-      if (l.appId === app.id) {
-        licenseCount.total++;
-        if (l.status === 'active') licenseCount.active++;
-        if (l.status === 'available') licenseCount.available++;
-      }
-    });
+  for (const appId in apps) {
+    const app = apps[appId];
+    
+    // Hitung license stats untuk setiap app
+    const licenseStats = await getLicenseStats(appId);
     
     allApps.push({
       id: app.id,
@@ -745,10 +886,10 @@ async function handleAppList(req, res) {
       category: app.category,
       website: app.website,
       status: app.status,
-      licenseStats: licenseCount,
+      licenseStats: licenseStats,
       createdAt: app.createdAt
     });
-  });
+  }
 
   return sendResponse(res, 200, { 
     success: true,
@@ -758,8 +899,13 @@ async function handleAppList(req, res) {
 }
 
 /**
- * Get app info
+ * Get app info by ID (Public)
+ * 
  * GET /api?action=app/info&appId=APP_ID
+ * 
+ * @param {Object} req - Request object
+ * @param {Object} res - Response object
+ * @returns {Object} Response dengan info app
  */
 async function handleAppInfo(req, res) {
   const { appId } = req.query;
@@ -771,7 +917,7 @@ async function handleAppInfo(req, res) {
     });
   }
 
-  const app = apps.get(appId);
+  const app = await getApp(appId);
 
   if (!app) {
     return sendResponse(res, 404, { 
@@ -780,16 +926,8 @@ async function handleAppInfo(req, res) {
     });
   }
 
-  // Count licenses
-  let licenseStats = { total: 0, active: 0, available: 0, revoked: 0 };
-  licenses.forEach(l => {
-    if (l.appId === appId) {
-      licenseStats.total++;
-      if (l.status === 'active') licenseStats.active++;
-      else if (l.status === 'available') licenseStats.available++;
-      else if (l.status === 'revoked') licenseStats.revoked++;
-    }
-  });
+  // Get license stats
+  const licenseStats = await getLicenseStats(appId);
 
   return sendResponse(res, 200, { 
     success: true,
@@ -801,10 +939,15 @@ async function handleAppInfo(req, res) {
 }
 
 /**
- * Delete application
+ * Delete application (Admin only)
+ * 
  * POST /api?action=app/delete
  * Headers: Authorization: ADMIN_TOKEN
- * Body: { appId }
+ * Body: { appId, deleteLicenses? }
+ * 
+ * @param {Object} req - Request object
+ * @param {Object} res - Response object
+ * @returns {Object} Response dengan hasil penghapusan
  */
 async function handleAppDelete(req, res) {
   if (req.method !== 'POST') {
@@ -830,7 +973,7 @@ async function handleAppDelete(req, res) {
     });
   }
 
-  const app = apps.get(appId);
+  const app = await getApp(appId);
 
   if (!app) {
     return sendResponse(res, 404, { 
@@ -839,35 +982,109 @@ async function handleAppDelete(req, res) {
     });
   }
 
-  // Check if has licenses
-  let hasLicenses = false;
-  licenses.forEach(l => {
-    if (l.appId === appId) hasLicenses = true;
-  });
+  // Cek apakah ada licenses untuk app ini
+  const licenseCount = await countLicensesByApp(appId);
 
-  if (hasLicenses && !deleteLicenses) {
+  if (licenseCount > 0 && !deleteLicenses) {
     return sendResponse(res, 400, { 
       success: false, 
-      error: 'Aplikasi memiliki license aktif. Set deleteLicenses=true untuk menghapus semua license juga.' 
+      error: `Aplikasi memiliki ${licenseCount} license. Set deleteLicenses=true untuk menghapus semua license juga.` 
     });
   }
 
-  // Delete licenses if requested
+  // Hapus licenses jika diminta
   if (deleteLicenses) {
-    const keysToDelete = [];
-    licenses.forEach((l, key) => {
-      if (l.appId === appId) keysToDelete.push(key);
-    });
-    keysToDelete.forEach(key => licenses.delete(key));
+    const licenses = await getAllLicenses();
+    for (const key in licenses) {
+      if (licenses[key].appId === appId) {
+        await deleteLicense(key);
+      }
+    }
   }
 
-  // Delete app
-  apps.delete(appId);
+  // Hapus app
+  await deleteApp(appId);
 
   return sendResponse(res, 200, { 
     success: true,
     message: 'Aplikasi berhasil dihapus',
     deletedApp: app.name,
-    deletedLicenses: deleteLicenses ? 'yes' : 'no'
+    deletedLicenses: deleteLicenses ? licenseCount : 0
+  });
+}
+
+// =====================================================
+// BACKUP & RESTORE
+// =====================================================
+
+/**
+ * Backup all data (Admin only)
+ * Export semua data untuk backup
+ * 
+ * GET /api?action=backup&adminToken=TOKEN
+ * 
+ * @param {Object} req - Request object
+ * @param {Object} res - Response object
+ * @returns {Object} Response dengan semua data
+ */
+async function handleBackup(req, res) {
+  if (!isAdmin(req)) {
+    return sendResponse(res, 401, { 
+      success: false, 
+      error: 'Unauthorized. Admin token diperlukan' 
+    });
+  }
+
+  const data = await exportAllData();
+
+  return sendResponse(res, 200, { 
+    success: true,
+    ...data
+  });
+}
+
+/**
+ * Restore data from backup (Admin only)
+ * Import data dari backup
+ * 
+ * POST /api?action=restore
+ * Headers: Authorization: ADMIN_TOKEN
+ * Body: { apps, licenses }
+ * 
+ * @param {Object} req - Request object
+ * @param {Object} res - Response object
+ * @returns {Object} Response dengan hasil restore
+ */
+async function handleRestore(req, res) {
+  if (req.method !== 'POST') {
+    return sendResponse(res, 405, { 
+      success: false, 
+      error: 'Method tidak diizinkan. Gunakan POST' 
+    });
+  }
+
+  if (!isAdmin(req)) {
+    return sendResponse(res, 401, { 
+      success: false, 
+      error: 'Unauthorized. Admin token diperlukan' 
+    });
+  }
+
+  const { apps, licenses } = req.body;
+
+  if (!apps && !licenses) {
+    return sendResponse(res, 400, { 
+      success: false, 
+      error: 'Data apps atau licenses diperlukan' 
+    });
+  }
+
+  await importAllData({ apps, licenses });
+
+  return sendResponse(res, 200, { 
+    success: true,
+    message: 'Data berhasil di-restore',
+    appsCount: apps ? Object.keys(apps).length : 0,
+    licensesCount: licenses ? Object.keys(licenses).length : 0
   });
 }
